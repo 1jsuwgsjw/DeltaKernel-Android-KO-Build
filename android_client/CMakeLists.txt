@@ -1,6 +1,5 @@
 # CTF|认证
 cmake_minimum_required(VERSION 3.22)
 project(delta_android_client LANGUAGES CXX)
-add_executable(delta_client main.cpp driver_client.cpp proc_maps.cpp)
+add_executable(delta_client main.cpp driver_client.cpp proc_maps.cpp game_reader.cpp)
 target_compile_features(delta_client PRIVATE cxx_std_17)
-
