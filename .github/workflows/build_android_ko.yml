@@ -12,11 +12,17 @@ on:
         description: Device manifest
         default: oneplus_ace_6.xml
         required: true
+      page_size:
+        description: Kernel page size (device getconf PAGESIZE = 4096)
+        type: choice
+        options: ['4k', '16k']
+        default: '4k'
+        required: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 480
     steps:
       - name: Checkout module project
         uses: actions/checkout@v4
@@ -48,9 +54,47 @@ jobs:
             --depth=1 --no-clone-bundle --no-tags
           repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
 
+      - name: Select exact page-size target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          SCRIPT=kernel_platform/build_with_bazel.py
+          test -f "$SCRIPT"
+          python3 - "${{ inputs.page_size }}" "$SCRIPT" <<'PY'
+          from pathlib import Path
+          import sys
+          page, filename = sys.argv[1:]
+          p = Path(filename)
+          text = p.read_text()
+          old = '{}[^-]*_{}.*_dist$'
+          if page == '4k':
+              new = '^{}_{}_dist$'
+          else:
+              new = '^{}16k_{}_dist$'
+          if old not in text:
+              raise SystemExit('build target query pattern changed upstream')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          echo "Selected page size: ${{ inputs.page_size }}"
+          grep -n 'query =.*_dist' "$SCRIPT" | head
+
+      - name: Restore Bazel kernel cache
+        uses: actions/cache@v4
+        with:
+          path: kernel_workspace/bazel-cache
+          key: kernel-bazel-${{ runner.os }}-sm8750-${{ inputs.manifest_branch }}-${{ inputs.manifest_file }}-${{ inputs.page_size }}-${{ hashFiles('kernel_module/**', 'shared/**') }}
+          restore-keys: |
+            kernel-bazel-${{ runner.os }}-sm8750-${{ inputs.manifest_branch }}-${{ inputs.manifest_file }}-${{ inputs.page_size }}-
+            kernel-bazel-${{ runner.os }}-sm8750-${{ inputs.manifest_branch }}-${{ inputs.manifest_file }}-
+
       - name: Build device kernel output
         run: |
+          set -euo pipefail
           cd kernel_workspace
+          (while true; do echo "===== runner resources $(date -Iseconds) ====="; free -h; df -h /; sleep 300; done) &
+          MONITOR_PID=$!
+          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
           LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 \
             KMI_SYMBOL_LIST_STRICT_MODE=0 \
             ./kernel_platform/oplus/build/oplus_build_kernel.sh sun perf
@@ -71,7 +115,8 @@ jobs:
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
           echo "symvers=$SYMVERS" >> "$GITHUB_OUTPUT"
           echo "Kernel output: $OUT"
-          grep -E 'CONFIG_(MODULES|MODVERSIONS|MODULE_SIG)=' "$CONFIG" || true
+          grep -E 'CONFIG_(MODULES|MODVERSIONS|MODULE_SIG|ARM64_4K_PAGES|ARM64_16K_PAGES)=' "$CONFIG" || true
+          if [[ '${{ inputs.page_size }}' == '4k' ]]; then grep -q '^CONFIG_ARM64_4K_PAGES=y' "$CONFIG"; else grep -q '^CONFIG_ARM64_16K_PAGES=y' "$CONFIG"; fi
 
       - name: Build delta external module
         shell: bash
@@ -106,4 +151,5 @@ jobs:
           name: delta_kernel_oneplus_ace_6
           path: dist/*
           if-no-files-found: error
+
 
