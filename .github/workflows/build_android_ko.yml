@@ -1,0 +1,109 @@
+# CTF|认证
+name: Build Delta Android KO
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: Dynamic manifest branch
+        default: oneplus/sm8750
+        required: true
+      manifest_file:
+        description: Device manifest
+        default: oneplus_ace_6.xml
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout module project
+        uses: actions/checkout@v4
+
+      - name: Maximize runner disk
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git jq \
+            libelf-dev libssl-dev lld llvm make python3 rsync unzip zip zstd
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /tmp/repo
+          sudo install -m 0755 /tmp/repo /usr/local/bin/repo
+
+      - name: Sync exact OnePlus Ace 6 source manifest
+        run: |
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+          repo init -u https://github.com/Numbersf/kernel_manifest.git \
+            -b '${{ inputs.manifest_branch }}' \
+            -m '${{ inputs.manifest_file }}' \
+            --depth=1 --no-clone-bundle --no-tags
+          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+
+      - name: Build device kernel output
+        run: |
+          cd kernel_workspace
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 \
+            KMI_SYMBOL_LIST_STRICT_MODE=0 \
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh sun perf
+
+      - name: Locate prepared kernel output
+        id: kernel_out
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
+          SYMVERS=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" \
+            -type f -name Module.symvers -path '*/out/*' | head -n 1)
+          test -n "$SYMVERS"
+          OUT=$(dirname "$SYMVERS")
+          CONFIG="$OUT/.config"
+          test -f "$CONFIG"
+          echo "common=$COMMON" >> "$GITHUB_OUTPUT"
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+          echo "symvers=$SYMVERS" >> "$GITHUB_OUTPUT"
+          echo "Kernel output: $OUT"
+          grep -E 'CONFIG_(MODULES|MODVERSIONS|MODULE_SIG)=' "$CONFIG" || true
+
+      - name: Build delta external module
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLANG=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86" \
+            -type f -path '*/bin/clang' | sort -V | tail -n 1)
+          test -n "$CLANG"
+          export PATH="$(dirname "$CLANG"):$PATH"
+          make -C '${{ steps.kernel_out.outputs.common }}' \
+            O='${{ steps.kernel_out.outputs.out }}' \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            M="$GITHUB_WORKSPACE/kernel_module" \
+            modules
+
+      - name: Package ABI evidence and KO
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp kernel_module/delta_kernel.ko dist/
+          cp '${{ steps.kernel_out.outputs.out }}/.config' dist/kernel.config
+          cp '${{ steps.kernel_out.outputs.symvers }}' dist/Module.symvers
+          KERNEL_IMAGE=$(find kernel_workspace/kernel_platform -type f -name Image -path '*/out/*' | head -n 1 || true)
+          if [[ -n "$KERNEL_IMAGE" ]]; then cp "$KERNEL_IMAGE" dist/reference_Image; fi
+          modinfo dist/delta_kernel.ko | tee dist/modinfo.txt
+          sha256sum dist/* | tee dist/SHA256SUMS
+
+      - name: Upload delta KO package
+        uses: actions/upload-artifact@v4
+        with:
+          name: delta_kernel_oneplus_ace_6
+          path: dist/*
+          if-no-files-found: error
+
