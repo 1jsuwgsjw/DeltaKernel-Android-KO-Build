@@ -69,15 +69,39 @@ jobs:
           text = p.read_text()
           old = '{}[^-]*_{}.*_dist$'
           if page == '4k':
-              new = '^{}_{}_dist$'
+              new = '^//{2}:{0}_{1}_dist$'
           else:
-              new = '^{}16k_{}_dist$'
+              new = '^//{2}:{0}16k_{1}_dist$'
           if old not in text:
               raise SystemExit('build target query pattern changed upstream')
           p.write_text(text.replace(old, new, 1))
           PY
           echo "Selected page size: ${{ inputs.page_size }}"
           grep -n 'query =.*_dist' "$SCRIPT" | head
+
+      - name: Inject delta module into selected kernel target
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/msm-kernel"
+          MOD="$ROOT/drivers/misc/delta_kernel"
+          mkdir -p "$MOD"
+          cp "$GITHUB_WORKSPACE/kernel_module/delta_kernel.c" "$MOD/delta_kernel.c"
+          cp "$GITHUB_WORKSPACE/shared/delta_protocol.h" "$MOD/delta_protocol.h"
+          sed -i 's#"../shared/delta_protocol.h"#"delta_protocol.h"#' "$MOD/delta_kernel.c"
+          printf 'obj-m += delta_kernel.o\n' > "$MOD/Makefile"
+          grep -q '^obj-m += delta_kernel/$' "$ROOT/drivers/misc/Makefile" || printf '\nobj-m += delta_kernel/\n' >> "$ROOT/drivers/misc/Makefile"
+          python3 - "$ROOT/sun.bzl" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); text=p.read_text()
+          needle='    _sun_in_tree_modules = [\n'
+          entry='        "drivers/misc/delta_kernel/delta_kernel.ko",\n'
+          if needle not in text: raise SystemExit('sun module list not found')
+          if entry not in text: text=text.replace(needle,needle+entry,1)
+          p.write_text(text)
+          PY
+          grep -n 'delta_kernel' "$ROOT/sun.bzl" "$ROOT/drivers/misc/Makefile" "$MOD/Makefile"
 
       - name: Restore Bazel kernel cache
         uses: actions/cache@v4
@@ -95,9 +119,14 @@ jobs:
           (while true; do echo "===== runner resources $(date -Iseconds) ====="; free -h; df -h /; sleep 300; done) &
           MONITOR_PID=$!
           trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+          export SHELLOPTS
           LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 \
             KMI_SYMBOL_LIST_STRICT_MODE=0 \
             ./kernel_platform/oplus/build/oplus_build_kernel.sh sun perf
+          DIST="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/out/msm-kernel-sun-perf/dist"
+          test -f "$DIST/Module.symvers"
+          test -f "$DIST/.config"
+          test -f "$DIST/delta_kernel.ko"
 
       - name: Locate prepared kernel output
         id: kernel_out
@@ -105,12 +134,13 @@ jobs:
         run: |
           set -euo pipefail
           COMMON="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
-          SYMVERS=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" \
-            -type f -name Module.symvers -path '*/out/*' | head -n 1)
-          test -n "$SYMVERS"
-          OUT=$(dirname "$SYMVERS")
-          CONFIG="$OUT/.config"
+          DIST="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/out/msm-kernel-sun-perf/dist"
+          SYMVERS="$DIST/Module.symvers"
+          CONFIG="$DIST/.config"
+          OUT="$DIST"
+          test -f "$SYMVERS"
           test -f "$CONFIG"
+          test -f "$DIST/delta_kernel.ko"
           echo "common=$COMMON" >> "$GITHUB_OUTPUT"
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
           echo "symvers=$SYMVERS" >> "$GITHUB_OUTPUT"
@@ -118,26 +148,20 @@ jobs:
           grep -E 'CONFIG_(MODULES|MODVERSIONS|MODULE_SIG|ARM64_4K_PAGES|ARM64_16K_PAGES)=' "$CONFIG" || true
           if [[ '${{ inputs.page_size }}' == '4k' ]]; then grep -q '^CONFIG_ARM64_4K_PAGES=y' "$CONFIG"; else grep -q '^CONFIG_ARM64_16K_PAGES=y' "$CONFIG"; fi
 
-      - name: Build delta external module
+      - name: Verify in-tree delta module
         shell: bash
         run: |
           set -euo pipefail
-          CLANG=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86" \
-            -type f -path '*/bin/clang' | sort -V | tail -n 1)
-          test -n "$CLANG"
-          export PATH="$(dirname "$CLANG"):$PATH"
-          make -C '${{ steps.kernel_out.outputs.common }}' \
-            O='${{ steps.kernel_out.outputs.out }}' \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            M="$GITHUB_WORKSPACE/kernel_module" \
-            modules
+          KO='${{ steps.kernel_out.outputs.out }}/delta_kernel.ko'
+          test -f "$KO"
+          modinfo "$KO"
 
       - name: Package ABI evidence and KO
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp kernel_module/delta_kernel.ko dist/
+          cp '${{ steps.kernel_out.outputs.out }}/delta_kernel.ko' dist/
           cp '${{ steps.kernel_out.outputs.out }}/.config' dist/kernel.config
           cp '${{ steps.kernel_out.outputs.symvers }}' dist/Module.symvers
           KERNEL_IMAGE=$(find kernel_workspace/kernel_platform -type f -name Image -path '*/out/*' | head -n 1 || true)
