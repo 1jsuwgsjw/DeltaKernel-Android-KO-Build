@@ -1,6 +1,7 @@
 /* CTF|认证 */
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/pid.h>
 #include <linux/sched/mm.h>
@@ -113,3 +114,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Delta Research");
 MODULE_DESCRIPTION("Delta Android kernel communication module");
 MODULE_VERSION("0.1.0");
+
