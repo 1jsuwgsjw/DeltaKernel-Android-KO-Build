@@ -97,15 +97,12 @@ static struct miscdevice delta_device = {
 static int __init delta_init(void)
 {
     int ret = misc_register(&delta_device);
-    if (!ret)
-        pr_info("delta_kernel: CTF|认证 loaded protocol=%u\n", DELTA_PROTOCOL_VERSION);
     return ret;
 }
 
 static void __exit delta_exit(void)
 {
     misc_deregister(&delta_device);
-    pr_info("delta_kernel: unloaded\n");
 }
 
 module_init(delta_init);
