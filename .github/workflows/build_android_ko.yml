@@ -24,9 +24,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 480
     steps:
-      - name: Checkout module project
-        uses: actions/checkout@v4
-
       - name: Maximize runner disk
         uses: easimon/maximize-build-space@master
         with:
@@ -35,6 +32,9 @@ jobs:
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
+
+      - name: Checkout module project
+        uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
