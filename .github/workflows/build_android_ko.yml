@@ -116,10 +116,9 @@ jobs:
         run: |
           set -euo pipefail
           cd kernel_workspace
-          (while true; do echo "===== runner resources $(date -Iseconds) ====="; free -h; df -h /; sleep 300; done) &
+          (while true; do echo "===== runner resources $(date -Iseconds) ====="; free -h; df -h "$GITHUB_WORKSPACE"; sleep 300; done) &
           MONITOR_PID=$!
           trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
-          export SHELLOPTS
           LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 \
             KMI_SYMBOL_LIST_STRICT_MODE=0 \
             ./kernel_platform/oplus/build/oplus_build_kernel.sh sun perf
@@ -175,5 +174,6 @@ jobs:
           name: delta_kernel_oneplus_ace_6
           path: dist/*
           if-no-files-found: error
+
 
 
